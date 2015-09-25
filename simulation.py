@@ -9,8 +9,8 @@ import numpy as np
 
 # Declare a few variables to be global
 global nZloci, nRloci
-nZloci = 10
-nRloci = 5
+nZloci = 20
+nRloci = 20
 
 ################################
 # Defining functions here
@@ -20,8 +20,10 @@ nRloci = 5
 mvn = np.random.multivariate_normal
 
 # Default values are meant for testing the model
-def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
-	mu=0.0002, alphaZ1=0.01, alphaZ2=0.01, alphaR=0.01):
+def MainModel(maxGen=500, K=512, theta=[0., 0.], omega=[[49., 0.],[0., 49.]],
+	mu=0.0005, alphaZ1=0.05, alphaZ2=0.05, alphaR=0.05, epiSigma=1.0, initSigma=1.0):
+	# alphas are variances, not standard deviations
+	# epi sigma is also a variance. Note that np.random.normal requires the sd not the variance as input
 	"""
 	MainModel uses all the functions below and actually simulates data.
 	In order:
@@ -35,17 +37,24 @@ def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
 		keep only survivors
 		regulate to carrying capacity
 	"""
+	# Epistatic coefficient matrices. A draw from random normals.
+	# epistaticCoeffMat[0,:,:] holds the coefficients for trait 1
+	# epistaticCoeffMat[1,:,:] holds the coefficients for trait 2
+	epistaticCoeffs = np.random.normal(0,np.sqrt(epiSigma),size=[2,nZloci,nZloci])
+	# Make them strictly upper triangular i.e zero diagonal
+	epistaticCoeffs[0,:,:] = np.triu(epistaticCoeffs[0,:,:],+1)
+	epistaticCoeffs[1,:,:] = np.triu(epistaticCoeffs[1,:,:],+1)
 
 	# First generation of Z genotypes
-	genoZ = np.array([np.random.normal(np.repeat(0, nZloci*4*K), 2)])
-	#genoZ = np.array(np.random.binomial(np.repeat(1, nZloci*4*K), .2),dtype=float)
-	genoZ.shape = [K, 2, 2*nZloci]
+	#genoZ = np.array([np.random.normal(np.repeat(0, nZloci*4*K), 2)])
+	genoZ = np.random.normal(0,initSigma,size=nZloci*4*5*K)
+	genoZ.shape = [5*K, 2, 2*nZloci]
 
 	# First generation of R genotypes
 	# We want to start them all at zero to see if the simulation generates correlation
 	#genoR = np.array([np.random.normal(np.repeat(0, nZloci*4*K), 1)])
-	genoR = np.array(np.repeat(0., nRloci*2*K),dtype=float)
-	genoR.shape = [K, 2*nRloci]
+	genoR = np.array(np.repeat(0., nRloci*2*5*K),dtype=float)
+	genoR.shape = [5*K, 2*nRloci]
 
 	# Calculate R phenotypes for initializing generation
 	# These phenotype values are NOT stored in the timeseries
@@ -54,6 +63,7 @@ def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
 	# Initialize arrays to hold variable values
 	mean_r_mu = np.empty(maxGen)
 	G = np.empty(shape=[maxGen,2,2])
+	M = np.empty(shape=[maxGen,2,2])
 	zz = np.empty(shape=[maxGen,2])
 	mean_fitness = np.empty(maxGen)
 
@@ -61,54 +71,67 @@ def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
 	# GENERATION LOOP
 	################################
 	for gen in range(maxGen):
-		if genoZ.shape[0]<2:
-			print('The population grew too small. Exiting...')
-			break
 
 		print('Generation ',gen)
 
+		# Store the unmutated population of genoZ to calculate the covariance
+		# structure of the effects of mutation
+		UMgenoZ = np.array(genoZ)
+
 		# Gametes mutate prior to mating. Mutate() doesn't return a value
 		# because it actually updates genoZ and genoR IN the function
+		# I think this is ecologically sound because mutations occur
+		# prior to fertilization during meiosis, right?
 		Mutate(genoZ, genoR, phenoR, mu, alphaZ1, alphaZ2, alphaR)
 
-		if np.isnan(genoZ).any():
-			print('nan detected in genoZ after Mutate() (line 68). Exiting...')
-			break
+		# Calculate the difference between mutated and unmutated phenotypes
+		phenotypeChange = zEpistaticPhenotypes(UMgenoZ, epistaticCoeffs)-zEpistaticPhenotypes(genoZ, epistaticCoeffs)
+		#print('original difference',phenotypeChange)
+		phenotypeChange = np.array(phenotypeChange[phenotypeChange.any(axis=1)!=0])
+		#print('difference without zeros', phenotypeChange)
 
 		# Mutated gametes recombine into the new population
 		# Each mating pair (monogamous) produces 4 offspring according to
 		# random assortment and unlinked loci (those are the same, right?)
 		offspring = Recombine(genoZ, genoR)
-		OSgenoZ = offspring['OSZ']
-		OSgenoR = offspring['OSR']
+		OSgenoZ = np.array(offspring['OSZ'])
+		OSgenoR = np.array(offspring['OSR'])
 
 		# Viability selection on the new population
 		# Calculate Z phenotypes
-		phenoZ = zPhenotypes(OSgenoZ)
+		OSphenoZ = zEpistaticPhenotypes(OSgenoZ, epistaticCoeffs)
 
+		print('Mean offspring phenotypes prior to selection: ',np.mean(OSphenoZ,axis=0))
 		# Calculate fitnesses
-		fitnesses = np.empty(phenoZ.shape[0])
-		fitnesses = Fitness(phenoZ, omega, theta)
+		#fitnesses = np.empty(OSphenoZ.shape[0])
+		fitnesses = Fitness(OSphenoZ, omega, theta)
 
 		# Choose survivors interpreting fitnesses as a vector of survival probabilities
 		survivors = np.array(np.random.binomial(1,fitnesses),dtype=bool)
 
 		# Redefine the genoZ and genoR vectors to be the survivors
-		genoZ = OSgenoZ[survivors,:,:]
-		phenoZ = phenoZ[survivors,:]
-		genoR = OSgenoR[survivors,:]
+		genoZ = np.array(OSgenoZ[survivors,:,:])
+		genoR = np.array(OSgenoR[survivors,:])
+		# Also chop down the phenoZ array to only the survivors
+		phenoZ = np.array(OSphenoZ[survivors,:])
 
 		# Regulate population if we have more survivors than we can support
 		if genoZ.shape[0]>K:
+			print('Regulating population down to carrying capacity.')
 			sample = np.random.choice(range(genoZ.shape[0]),size=K,replace=False)
-			genoZ = genoZ[sample,:,:]
-			phenoZ = phenoZ[sample,:]
-			genoR = genoR[sample,:]
+			genoZ = np.array(genoZ[sample,:,:])
+			phenoZ = np.array(phenoZ[sample,:])
+			genoR = np.array(genoR[sample,:])
+		elif genoZ.shape[0]<2:
+			print('The population went extinct. Breaking loop and moving to next run.')
+			break
+
+		print('Mean offspring phenotypes after selection',np.mean(phenoZ,axis=0))
 
 		# Calculate individual mutational correlation phenotypes (r_mu) for current population
 		phenoR = rPhenotypes(genoR)
 
-		print('Population contains ',phenoR.size,' individuals.')
+		print('Population contains ',genoZ.shape[0],' individuals.')
 
 		# UPDATE AVERAGE r_mu
 		mean_r_mu[gen] = np.mean(phenoR)
@@ -116,8 +139,20 @@ def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
 		# UPDATE G MATRIX
 		G[gen,:,:] = np.cov(phenoZ,rowvar=0)
 
+		# UDATE M MATRIX
+		# Around line 72, we saved the unmutated genotypes as UMgenoZ and
+		# calculated the differences between the mutated phenotypes and unmutated.
+		# Calculate the M matrix for the effects of the mutations that went into
+		# the newest generation. i.e. the mutations that occurred during meiosis this time
+		if phenotypeChange.shape[0]!=0: # often there will be no mutations so we sometimes have to set M to zeros
+			M[gen,:,:] = np.cov(phenotypeChange,rowvar=0)
+		else:
+			M[gen,:,:] = np.zeros(shape=[2,2])
+
+		print('Effects of mutation matrix M, is ',M[gen,:,:])
+
 		# Save the average trait values
-		zz[gen,:] = [np.mean(phenoZ[:,0]),np.mean(phenoZ[:,1])]
+		zz[gen,:] = np.mean(phenoZ,axis=0)
 		print('Mean trait values (phenotype) are ',zz[gen,:])
 
 		# Save mean fitness value
@@ -126,6 +161,7 @@ def MainModel(maxGen=500, K=100, theta=[1., -1.], omega=[[50., 0.],[0., 50.]],
 
 	return({
 		'G':G,
+		'M':M,
 		'r_mu':mean_r_mu,
 		'ztraits':zz,
 		'fitness':mean_fitness
@@ -138,8 +174,6 @@ def Mutate(genoZ, genoR, phenoR, mu, alphaZ1, alphaZ2, alphaR):
 	genotypes.
 	Mutate takes the current population and updates to a mutated version
 	"""
-	# Store the unmutated population of genoZ to calculate the covariance structure of the mutation effects
-	unmutatedGenoZ = np.array(genoZ)
 
 	# Choose mutation locations for Z genotypes
 	mutZlocs = np.array(np.random.binomial(np.repeat(1,genoZ.shape[0]*2*nZloci), mu),dtype=bool)
@@ -147,9 +181,15 @@ def Mutate(genoZ, genoR, phenoR, mu, alphaZ1, alphaZ2, alphaR):
 	mutZlocs = np.repeat(mutZlocs, 2, axis=0) # repeat each line twice
 	mutZlocs.shape = [genoZ.shape[0],2,2*nZloci] # reshape to [number of individuals deep, 2 high, 2*nZloci wide]
 
+	if np.sum(mutZlocs) != 0:
+		print('Mutations in genoZ')
+
 	# Choose mutation locations for R genotypes
 	mutRlocs = np.array(np.random.binomial(np.repeat(1,2*nRloci*genoR.shape[0]), mu),dtype=bool)
 	mutRlocs.shape = [genoR.shape[0],2*nRloci] # number of individuals high, 2*nRloci wide (diploid)
+
+	if np.sum(mutRlocs) != 0:
+		print('Mutations in genoR')
 
 	# Add a bivariate Gaussian mutation with covariance Sigma to selected Z loci
 	# Also add a univariate Gaussian mutation to selected R loci
@@ -177,7 +217,7 @@ def Mutate(genoZ, genoR, phenoR, mu, alphaZ1, alphaZ2, alphaR):
 		genoZ[i,:,:][mutZlocs[i,:,:]] = genoZ[i,:,:][mutZlocs[i,:,:]] + mutZ
 
 		# R mutations drawn from univariate normal, variance alphaR
-		mutR = np.random.normal(0,alphaR,np.sum(mutRlocs[i,:]))
+		mutR = np.random.normal(0,np.sqrt(alphaR),np.sum(mutRlocs[i,:]))
 
 		# Add mutations to existing genotype
 		genoR[i,:][mutRlocs[i,:]] = genoR[i,:][mutRlocs[i,:]] + mutR
@@ -259,9 +299,26 @@ def zPhenotypes(genoZ):
 
 	return(phenoZ)
 
-def zEpistaticPhenotypes(genoZ):
-	foo = 'bar'
-	return
+def zEpistaticPhenotypes(genoZ,epistaticCoeffs):
+	additiveEffects = np.sum(genoZ, axis=2)
+	Z1epistaticEffects = np.empty(shape=[genoZ.shape[0]])
+	Z2epistaticEffects = np.empty(shape=[genoZ.shape[0]])
+	# Add the effects on different chromosomes together (i.e. sum across chromosomes)
+	# genoZ.shape should now be [population, 2, nZloci]
+	genoZSum = genoZ[:,:,:nZloci] + genoZ[:,:,nZloci:]
+
+	# Loop through each individual, calculating it's epistatic phenotype for each trait.
+	for i in range(genoZSum.shape[0]):
+		# sum the effects of each locus on trait 1
+		# vector genoZ[i,0,:] %*% coeff_matrix ON Z1 %*% genoZ[i,1,:]transpose
+		Z1epistaticEffects[i] = np.dot( np.dot(genoZSum[i,0,:], epistaticCoeffs[0,:,:]), genoZSum[i,1,:].T)
+		# sum the effects of each locus on trait 2
+		# vector genoZ[i,0,:] %*% coeff_matrix ON Z2
+		Z2epistaticEffects[i] = np.dot( np.dot(genoZSum[i,0,:], epistaticCoeffs[1,:,:]), genoZSum[i,1,:].T)
+
+	phenoZ = additiveEffects + np.array([Z1epistaticEffects,Z2epistaticEffects]).T
+
+	return(phenoZ)
 
 def Fitness(phenoZ, omega, theta):
 	# Input: Z phenotypes, selection surface, fitness optimum
